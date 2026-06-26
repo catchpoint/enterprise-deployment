@@ -44,7 +44,7 @@ readonly CATCHPOINT_RHEL_REPO_FILE="/etc/yum.repos.d/catchpoint.repo"
 readonly CATCHPOINT_DEB_REPO="https://proddebrepo.catchpoint.net/repo/proddebrepo.list"
 readonly CATCHPOINT_DEB_REPO_FILE="/etc/apt/sources.list.d/catchpoint.list"
 readonly CATCHPOINT_DEB_KEY_URL="https://proddebrepo.catchpoint.net/repo/prod-key.asc"
-readonly CATCHPOINT_DEB_KEYRING="/usr/share/keyrings/catchpoint-archive-keyring.gpg"
+readonly CATCHPOINT_DEB_KEY_LEGACY_DIR="/etc/apt/trusted.gpg.d"
 
 ###############################################################################
 # @description Displays help/usage information.
@@ -349,12 +349,7 @@ install_repo(){
             return 1
         fi
 
-        if ! command -v gpg >/dev/null 2>&1; then
-            print_error "gpg is required to install the Catchpoint APT repository key. Please install 'gnupg' and try again."
-            return 1
-        fi
-
-        if ! curl -fsSL "${CATCHPOINT_DEB_KEY_URL}" | gpg --dearmor -o "${CATCHPOINT_DEB_KEYRING}"; then
+        if ! curl -fsSL "${CATCHPOINT_DEB_KEY_URL}" -o "${CATCHPOINT_DEB_KEY_LEGACY_DIR}/prod-key.asc"; then
             print_error "Failed to download or add Catchpoint APT repository key from ${CATCHPOINT_DEB_KEY_URL}."
             return 1
         fi

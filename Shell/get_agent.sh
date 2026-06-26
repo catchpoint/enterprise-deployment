@@ -95,11 +95,11 @@ EOF
 #
 # @args $1... string All arguments to parse.
 #
-# @set ACTION string The action to perform (e.g., "package").
-# @set FORMATS string The package formats to create (e.g., "rpm,deb").
-# @set TARGET_ARCHITECTURE string The target architecture for the build/package (e.g., "x86_64").
-# @set BUILD_ENVIRONMENT string The build environment (e.g., "redhat8").
-# @set MONITORS string The specific monitor to test/build (e.g., "Ftp" or "Ssh"). Overrides the MONITORS variable in the parent script if set.
+# @set API_TOKEN string API token for activation (from --api-key). 
+# @set NODE_NAME string Node name for activation (from --node). 
+# @set MACHINE_ID string 12-character machine ID override (from --machine-id). 
+# @set INSTANCE_NAME string Instance name/hostname override (from --instance-name). 
+# @set INSTALL_PLAYWRIGHT/INSTALL_LEGACY bool Whether to install optional Playwright and legacy monitor packages.
 #
 # @exitcode 0 for success.
 # @exitcode 1 for failure.
@@ -135,7 +135,10 @@ parse_args() {
                 fi
                 ;;
             -m|--machine-id)
-                if [ -n "$2" ] && ! echo "$2" | grep -Eq '^[A-Z0-9]{12}$'; then
+                if [ -z "$2" ]; then
+                    print_error "Missing argument for --machine-id. Please provide a valid machine ID."
+                    return 1
+                elif ! echo "$2" | grep -Eq '^[A-Za-z0-9]{12}$'; then
                     print_error "Invalid machine ID: $2. Machine ID must be a 12-character alphanumeric string."
                     return 1
                 fi
@@ -186,7 +189,7 @@ print_message() {
 # @exitcode 0 If printf succeeds.
 # @exitcode 1 If printf fails (this should never occur).
 print_info() {
-    print_message "$(printf "%sINFO:%s %s\n" "${GREEN}" "${NO_COLOR}" "${*}")"
+    print_message "$(printf "%sINFO:%s %s" "${GREEN:-}" "${NO_COLOR:-}" "$*")"
 }
 
 ###############################################################################
@@ -197,7 +200,7 @@ print_info() {
 # @exitcode 0 If printf succeeds.
 # @exitcode 1 If printf fails (this should never occur).
 print_warning() {
-    print_message "$(printf "%sWARNING:%s %s\n" "${YELLOW}" "${NO_COLOR}" "${*}")"
+    print_message "$(printf "%sWARNING:%s %s" "${YELLOW:-}" "${NO_COLOR:-}" "$*")"
 }
 
 ###############################################################################
@@ -208,7 +211,7 @@ print_warning() {
 # @exitcode 0 If printf succeeds.
 # @exitcode 1 If printf fails (this should never occur).
 print_error() {
-    print_message "$(printf "%sERROR: %s %s\n" "${RED}" "${*}" "${NO_COLOR}")"
+    print_message "$(printf "%sERROR:%s %s" "${RED:-}" "${NO_COLOR:-}" "$*")"
 }
 
 ###############################################################################
@@ -346,6 +349,11 @@ install_repo(){
             return 1
         fi
 
+        if ! command -v gpg >/dev/null 2>&1; then
+            print_error "gpg is required to install the Catchpoint APT repository key. Please install 'gnupg' and try again."
+            return 1
+        fi
+
         if ! curl -fsSL "${CATCHPOINT_DEB_KEY_URL}" | gpg --dearmor -o "${CATCHPOINT_DEB_KEYRING}"; then
             print_error "Failed to download or add Catchpoint APT repository key from ${CATCHPOINT_DEB_KEY_URL}."
             return 1
@@ -455,7 +463,7 @@ get_os() {
     is_redhat=$(grep -qi "red hat" "${release_file}" && echo true || echo false)
     is_amazon=$(grep -qi "amazon" "${release_file}" && echo true || echo false)
     is_rocky=$(grep -qi "rocky" "${release_file}" && echo true || echo false)
-    version_major=$(grep -oP '(?<=VERSION_ID=")[0-9]+' "${release_file}" || echo "")
+    version_major=$(awk -F= '/^VERSION_ID=/{gsub(/"/,"",$2); split($2,a,"."); print a[1]; exit}' "${release_file}" 2>/dev/null || echo "")
 
     if [ "${is_ubuntu}" = true ]; then
         echo "Ubuntu ${version_major}"
@@ -531,7 +539,7 @@ activate_instance() {
     fi
 
     print_info "Activating the instance with the following command:"
-    print_info "'catchpoint activate --api-key ${API_TOKEN} --node ${NODE_NAME} --os ${os} ${extra_switches} --yes'"
+print_info "catchpoint activate --api-key <REDACTED> --node ${NODE_NAME} --os ${os} ${extra_switches} --yes"
     # shellcheck disable=SC2086 # We need globbing here for the extra switches.
     if ! catchpoint activate --api-key "${API_TOKEN}" --node "${NODE_NAME}" --os "${os}" ${extra_switches} --yes; then
         print_error "Failed to activate the instance with the provided API token and node name."

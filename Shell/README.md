@@ -40,11 +40,11 @@ Parse the incoming arguments.
 
 #### Variables set
 
-* **ACTION** (string): The action to perform (e.g., "package").
-* **FORMATS** (string): The package formats to create (e.g., "rpm,deb").
-* **TARGET_ARCHITECTURE** (string): The target architecture for the build/package (e.g., "x86_64").
-* **BUILD_ENVIRONMENT** (string): The build environment (e.g., "redhat8").
-* **MONITORS** (string): The specific monitor to test/build (e.g., "Ftp" or "Ssh"). Overrides the MONITORS variable in the parent script if set.
+* **API_TOKEN** (string): API token provided via `--api-key` for post-install activation.
+* **NODE_NAME** (string): Node name provided via `--node` for post-install activation.
+* **MACHINE_ID** (string): Optional 12-character alphanumeric machine ID override provided via `--machine-id`.
+* **INSTANCE_NAME** (string): Optional instance/hostname override provided via `--instance-name`.
+* **INSTALL_PLAYWRIGHT / INSTALL_LEGACY** (boolean): Whether to install the optional Playwright and legacy monitor packages.
 
 #### Exit codes
 

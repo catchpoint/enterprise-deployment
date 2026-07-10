@@ -17,6 +17,10 @@ API_TOKEN=""
 NODE_NAME=""
 EXCLUDE_SWITCHES=""
 
+# Token-based activation defaults
+BASE_ACTIVATION_URI="https://io.catchpoint.com"
+ACTIVATION_CODE=""
+
 if command -v tput > /dev/null 2>&1 && [ "$(tput colors 2> /dev/null || echo 0)" -ge 8 ]; then
     RED=$(tput setaf 1)
     readonly RED
@@ -33,6 +37,10 @@ readonly REQUIRED_PACKAGES='curl sudo'
 readonly MACHINE_ID_KEY="Node_InstanceId"
 readonly INSTANCE_NAME_KEY="Node_InstanceName"
 readonly COMMENG_CONF="/etc/catchpoint.d/CommEng.conf"
+
+readonly STAGE_URI="https://iostage.catchpoint.com"
+readonly QA_URI="https://ioqa.catchpoint.com"
+readonly ACTIVATION_ENDPOINT="/api/v4/instances/activate"
 
 #########################################################################################
 # RHEL
@@ -81,6 +89,7 @@ DESCRIPTION:
 OPTIONS:
     -a, --api-key        [Optional] Provide an API token for activation. Must be used with --node.
     -n, --node           [Optional] Provide a node name for activation. Must be used with --api-key.
+
     -m, --machine-id     [Optional] Specify a machine ID to use for the installation.
     -i, --instance-name  [Optional] Specify an instance name to use for the installation.
     --skip-playwright    [Optional] Skip the installation of the Playwright package.
@@ -93,7 +102,7 @@ EOF
 ###############################################################################
 # @description Parse the incoming arguments.
 #
-# @args $1... string All arguments to parse.
+# @arg $1... string All arguments to parse.
 #
 # @set API_TOKEN string API token for activation (from --api-key). 
 # @set NODE_NAME string Node name for activation (from --node). 
@@ -144,6 +153,15 @@ parse_args() {
                 fi
                 MACHINE_ID="$2"
                 shift 2
+                ;;
+            -c|--code)
+                if [ -n "$2" ]; then
+                    ACTIVATION_CODE="$2"
+                    shift 2
+                else
+                    print_error "Missing argument for --code. Please provide a valid activation code."
+                    return 1
+                fi
                 ;;
             --skip-playwright)
                 INSTALL_PLAYWRIGHT=false
@@ -229,9 +247,12 @@ is_root() {
 }
 
 ###############################################################################
-# @description Checks if both API_TOKEN and NODE_NAME are provided for activation.
-# If only one is provided, it prints an error message and returns a non-zero exit code.
-# If neither is provided, it prints an informational message and sleeps for 5 seconds
+# @description Checks if both API_TOKEN and NODE_NAME or the ACTIVATION_CODE are
+# provided.
+# If only one of API_TOKEN or NODE_NAME is provided, it prints an error message
+# and returns a non-zero exit code.
+# If ACTIVATION_CODE is provided, it will be used for activation instead of API_TOKEN and NODE_NAME.
+# If none are provided, it prints an informational message and sleeps for 5 seconds
 # to allow the user to cancel if they want to provide these values.
 #
 # @noargs
@@ -241,12 +262,17 @@ is_root() {
 confirm_is_activateable() {
     if [ -n "${API_TOKEN}" ] && [ -n "${NODE_NAME}" ]; then
         print_info "API token and node name provided. The agent will be activated after installation."
+    elif [ -n "${ACTIVATION_CODE}" ]; then
+        print_info "Activation token provided. The agent will be activated after installation."
+    # We only reach this point if one of the values was provided but the other wasn't.
     elif [ -n "${API_TOKEN}" ] || [ -n "${NODE_NAME}" ]; then
         print_error "Both API token and node name must be provided for activation. Please provide both or neither."
         return 1
     else
         # Print info and then sleep for 5 seconds to give the user time to read the message and cancel if they want to.
-        print_info "No API token or node name provided. The agent will not be activated after installation."
+        print_info "No API_token+node_name combo or ACTIVATION_CODE provided. The agent will not be activated after installation."
+        print_info "To add an instance directly from the portal, provide the Activation Code using the --code option"
+        print_info "To activate an instance under a specific node, provide both the API token and node name using the --api-key and --node options."
         print_warning "Press Ctrl+C within 5 seconds to cancel the installation if you want to provide these values."
         sleep 5
     fi
@@ -484,7 +510,10 @@ get_os() {
 }
 
 ###############################################################################
-# @description Activates the Catchpoint instance using the provided API token and node name.
+# @description Activates the Catchpoint instance.
+# if ACTIVATION_CODE is specified, the activation uses a direct curl call to the endpoint.
+# Otherwise, if API_TOKEN and NODE_NAME are provided, the activation uses the 
+# Catchpoint CLI with the provided API token and node name.
 # If either the API token or node name is missing, it prints an informational message and skips activation.
 #
 # @noargs
@@ -492,13 +521,27 @@ get_os() {
 # @exitcode 0 If activation is successful or skipped due to missing credentials.
 # @exitcode 1 If activation fails due to an error.
 activate_instance() {
-    if [ -z "${API_TOKEN}" ] || [ -z "${NODE_NAME}" ]; then
-        print_info "API token or node name not provided. Skipping activation."
-        print_info "To activate the instance later, use the following command:"
-        print_info "catchpoint activate --api-key <API_TOKEN> --node <NODE_NAME> --os <OS>"
+    if [ -n "${ACTIVATION_CODE}" ]; then
+        activate_instance_with_code
+        return $?
+    elif [ -n "${API_TOKEN}" ] && [ -n "${NODE_NAME}" ]; then
+        activate_instance_with_cli
+        return $?
+    else
+        print_info "No activation credentials provided. Skipping activation."
         return 0
     fi
+}
 
+###############################################################################
+# @description Activates the Catchpoint instance using the Catchpoint CLI with 
+# the provided API token and node name.
+#
+# @noargs
+#
+# @exitcode 0 If activation is successful.
+# @exitcode 1 If activation fails due to an error.
+activate_instance_with_cli() {
     if ! command -v catchpoint >/dev/null 2>&1; then
         print_error "Catchpoint CLI is not installed. Cannot activate the instance."
         return 1
@@ -534,7 +577,7 @@ activate_instance() {
     fi
 
     print_info "Activating the instance with the following command:"
-print_info "catchpoint activate --api-key <REDACTED> --node ${NODE_NAME} --os ${os} ${extra_switches} --yes"
+    print_info "catchpoint activate --api-key <REDACTED> --node ${NODE_NAME} --os ${os} ${extra_switches} --yes"
     # shellcheck disable=SC2086 # We need globbing here for the extra switches.
     if ! catchpoint activate --api-key "${API_TOKEN}" --node "${NODE_NAME}" --os "${os}" ${extra_switches} --yes; then
         print_error "Failed to activate the instance with the provided API token and node name."
@@ -542,6 +585,136 @@ print_info "catchpoint activate --api-key <REDACTED> --node ${NODE_NAME} --os ${
     fi
 
     print_info "Instance activated successfully under node name '${NODE_NAME}'."
+}
+
+###############################################################################
+# @description Activates the Catchpoint instance using the provided ACTIVATION_CODE 
+# by making a direct API call to the activation endpoint.
+#
+# @noargs
+#
+# @exitcode 0 If activation is successful.
+# @exitcode 1 If activation fails due to an error.
+activate_instance_with_code() {
+    os=$(get_os)
+    payload=$(cat <<EOF
+{
+    "os": "${os}"
+}
+EOF
+)
+    url_encoded_payload=$(url_encode "${payload}")
+
+    env=$(get_env)
+    if [ "${env}" = "stage" ]; then
+        BASE_ACTIVATION_URI="${STAGE_URI}"
+    elif [ "${env}" = "qa" ]; then
+        BASE_ACTIVATION_URI="${QA_URI}"
+    fi
+
+    activation_url="${BASE_ACTIVATION_URI}${ACTIVATION_ENDPOINT}"
+
+    print_info "Activating the instance using the provided activation code at ${activation_url}."
+    if ! response=$(curl_request "POST" "${activation_url}" "${url_encoded_payload}"); then
+        print_error "Failed to activate the instance using the activation code. Please check your activation code and node name."
+        return 1
+    fi
+}
+
+###############################################################################
+# @description URL-encodes the provided string using Python's urllib library. 
+# It first checks for the availability of Python 3, and if not found, it falls 
+# back to a specific Catchpoint Python interpreter. The encoded string is printed to stdout.
+#
+# @arg $1 string The string to be URL-encoded.
+#
+# @stdout The URL-encoded string.
+url_encode() 
+{
+    data="${1}"
+    # Use available python3 or fall back to catchpoint python
+    if ! PYTHON=$(command -v python3); then
+        PYTHON="/opt/catchpoint/bin/python"
+    fi
+
+    ${PYTHON} -c "try: import urllib.request as urllib
+except: import urllib 
+import sys
+sys.stdout.write(urllib.quote(\"${data}\"))"
+}
+
+###############################################################################
+# @description Makes a curl request to the specified URL with the given method 
+# and data. It handles HTTP response codes and errors, returning the JSON 
+# response if successful.
+#
+# @arg $1 string The HTTP method (e.g., GET, POST).
+# @arg $2 string The URL to which the request is made.
+# @arg $3 string [Optional] The data to be sent with the request (for POST/PUT requests).
+#
+# @stdout The JSON response from the server if the request is successful.
+#
+# @exitcode 0 If the request is successful and returns a valid JSON response.
+# @exitcode 1 If there is an error with the request or response.
+curl_request()
+{
+    method=$1
+    url=$2
+    data=$3
+    if [ -z "${method}" ] || [ -z "${url}" ]; then
+        print_error "curl_request: method and url are required parameters."
+        return 1
+    fi
+
+    accept_header="accept: application/json"
+    auth_header="Authorization: Bearer ${ACTIVATION_CODE}"
+    content_header="Content-Type: application/json"
+
+    # Append the http_code/response code to the end of the json response to provide better error handling experience
+    if [ -n "${data}" ]; then
+        response=$(curl -sw 'HTTP_STATUS:%{response_code}' -X "${method}" "${url}" -H "${accept_header}" -H "${auth_header}" -H "${content_header}" -d "${data}")
+    else
+        response=$(curl -sw 'HTTP_STATUS:%{http_code}' -X "${method}" "${url}" -H "${accept_header}" -H "${auth_header}")
+    fi
+
+    # HTTP_STATUS:### is appended to the request. Parse it out separately and evaluate it
+    json_resp=$(echo "${response}" | sed -E 's/HTTP_STATUS\:[0-9]{3}$//')
+    http_code=$(echo "${response}" | tr -d '\n' | sed -E 's/.*HTTP_STATUS:([0-9]{3})$/\1/')
+    
+    if [ "${http_code}" -eq 400 ]; then
+        print_error "Cannot connect to the API - BAD_REQUEST. Check the payload for missing or improperly formatted values"
+        if [ -n "${data}" ]; then
+            print_error "Payload: ${data}"
+        fi
+        return 1
+    elif [ "${http_code}" -eq 401 ]; then
+        print_error "Cannot connect to the API - UNAUTHORIZED. (ensure that the API Key is valid)"
+        return 1
+    elif [ "${http_code}" -ge 402 ]; then
+        print_error "Cannot connect to the API, check your internet connectivity - HTTP Code: ${http_code}"
+        return 1
+    fi
+
+    if [ -z "${json_resp}" ]; then
+        print_error "Received no response to query"
+        return 1
+    fi
+
+    # All payloads should have an errors array (hopefully empty), if we can't find it, something is wrong.
+    if ! err_resp=$(echo "${json_resp}" | jq '[.errors[]]' 2>/dev/null); then
+        print_error "Response was improperly formatted"
+        return 1
+    fi
+
+    if [ "$(echo "${err_resp}" | jq 'length' 2>/dev/null)" != '0'  ]; then
+        print_error "API call returned errors. Check parameters to ensure they will return appropriate results."
+        if [ -n "${err_resp}" ]; then
+            print_error "Details: ${err_resp}"
+        fi
+        return 1
+    fi
+
+    echo "${json_resp}"
 }
 
 ###############################################################################

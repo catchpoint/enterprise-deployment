@@ -16,6 +16,7 @@ INSTALL_LEGACY="true"
 API_TOKEN=""
 NODE_NAME=""
 EXCLUDE_SWITCHES=""
+SKIP_INSTALL="false"
 
 # Token-based activation defaults
 BASE_ACTIVATION_URI="https://io.catchpoint.com"
@@ -89,11 +90,12 @@ DESCRIPTION:
 OPTIONS:
     -a, --api-key        [Optional] Provide an API token for activation. Must be used with --node.
     -n, --node           [Optional] Provide a node name for activation. Must be used with --api-key.
-
+    -c, --code           [Optional] Provide a one-time use activation code for activation. Cannot be used with --api-key or --node.
     -m, --machine-id     [Optional] Specify a machine ID to use for the installation.
     -i, --instance-name  [Optional] Specify an instance name to use for the installation.
     --skip-playwright    [Optional] Skip the installation of the Playwright package.
     --skip-legacy        [Optional] Skip the installation of the syntheticagent-legacy package.
+    --skip-install       [Optional] Skip the installation of the Catchpoint SyntheticAgent (for reactivation purposes).
     -h, --help           Show this help message and exit.
     -v, --version        Show the script version and exit.
 EOF
@@ -102,13 +104,15 @@ EOF
 ###############################################################################
 # @description Parse the incoming arguments.
 #
-# @arg $1... string All arguments to parse.
+# @arg $1 string All arguments to parse.
 #
-# @set API_TOKEN string API token for activation (from --api-key). 
-# @set NODE_NAME string Node name for activation (from --node). 
-# @set MACHINE_ID string 12-character machine ID override (from --machine-id). 
-# @set INSTANCE_NAME string Instance name/hostname override (from --instance-name). 
+# @set API_TOKEN string API token for activation (from --api-key).
+# @set NODE_NAME string Node name for activation (from --node).
+# @set ACTIVATION_CODE string Activation code for activation (from --code).
+# @set MACHINE_ID string 12-character machine ID override (from --machine-id).
+# @set INSTANCE_NAME string Instance name/hostname override (from --instance-name).
 # @set INSTALL_PLAYWRIGHT/INSTALL_LEGACY bool Whether to install optional Playwright and legacy monitor packages.
+# @set SKIP_INSTALL bool Whether to skip the installation of the Catchpoint SyntheticAgent.
 #
 # @exitcode 0 for success.
 # @exitcode 1 for failure.
@@ -169,6 +173,10 @@ parse_args() {
                 ;;
             --skip-legacy)
                 INSTALL_LEGACY=false
+                shift
+                ;;
+            --skip-install)
+                SKIP_INSTALL=true
                 shift
                 ;;
             -h|--help)
@@ -300,7 +308,7 @@ confirm_prerequisites() {
     fi
 
     if ! is_root; then
-        print_error "This script must be run as root. Please run with sudo or as root user."
+        print_error "When installing, this script must be run as root. Please run with sudo or as root user."
         return 1
     fi
 
@@ -510,6 +518,46 @@ get_os() {
 }
 
 ###############################################################################
+# @description Retrieves the machine ID using the Catchpoint CLI. If the Catchpoint 
+# CLI is not installed, it prints an error message and returns a non-zero exit code.
+#
+# @noargs
+#
+# @stdout The machine ID if the Catchpoint CLI is installed and the command succeeds.
+#
+# @exitcode 0 If the machine ID is retrieved successfully.
+# @exitcode 1 If the Catchpoint CLI is not installed or if there is an error retrieving the machine ID.
+get_machine_id() {
+    if ! command -v catchpoint >/dev/null 2>&1; then
+        print_error "Catchpoint CLI is not installed. Cannot retrieve machine ID."
+        return 1
+    fi
+    # Take the MID as the value after ': '.
+    catchpoint machine-id | cut -d ':' -f 2 | tr -d ' '
+}
+
+###############################################################################
+# @description Gets the system hostname. Attempts to use the 'hostname' command 
+# first, and if it's not available, falls back to 'uname -n'.
+#
+# @noargs
+#
+# @stdout The system hostname if the 'hostname' command is available.
+#
+# @exitcode 0 If the hostname is retrieved successfully.
+# @exitcode 1 If neither 'hostname' nor 'uname' command is available or if there is an error retrieving the hostname.
+get_hostname() {
+    if command -v hostname >/dev/null 2>&1; then
+        hostname | cut -d '.' -f 1
+    elif command -v uname >/dev/null 2>&1; then
+        uname -n | cut -d '.' -f 1
+    else
+        print_error "The 'hostname' command is not available. Cannot retrieve the system hostname."
+        return 1
+    fi
+}
+
+###############################################################################
 # @description Activates the Catchpoint instance.
 # if ACTIVATION_CODE is specified, the activation uses a direct curl call to the endpoint.
 # Otherwise, if API_TOKEN and NODE_NAME are provided, the activation uses the 
@@ -557,14 +605,8 @@ activate_instance_with_cli() {
 
     # If INSTANCE_NAME is provided, use it. Otherwise, try to get the system hostname.
     # Else, the activation script will use the default hostname of the system.
-    if [ -n "${INSTANCE_NAME}" ]; then
-        print_info "Using provided instance name: ${INSTANCE_NAME}"
-        extra_switches="--hostname ${INSTANCE_NAME}"
-    elif command -v hostname >/dev/null 2>&1; then
-        INSTANCE_NAME=$(hostname | cut -d '.' -f 1)
-        print_info "No instance name provided. Using system hostname: ${INSTANCE_NAME}"
-        extra_switches="--hostname ${INSTANCE_NAME}"
-    fi
+    instance_name=${INSTANCE_NAME:-$(get_hostname)}
+    extra_switches="--hostname ${instance_name}"
 
     if [ -n "${MACHINE_ID}" ]; then
         print_info "Using provided machine ID: ${MACHINE_ID}"
@@ -596,15 +638,25 @@ activate_instance_with_cli() {
 # @exitcode 0 If activation is successful.
 # @exitcode 1 If activation fails due to an error.
 activate_instance_with_code() {
-    os=$(get_os)
+    os=$(url_encode "$(get_os)")
+
+    # The MID source-of-truth should be what the agent is using right now, since the single-use flow
+    # doesn't require the user to provide it.
+    if ! mid=$(url_encode "$(get_machine_id)"); then
+        print_error "Failed to retrieve machine ID. Cannot activate the instance."
+        return 1
+    fi
+
+    instance_name=${INSTANCE_NAME:-$(get_hostname)}
+
     payload=$(cat <<EOF
 {
-    "os": "${os}"
+    "os": "${os}",
+    "machineid": "${mid}",
+    "hostname": "$(url_encode "${instance_name}")"
 }
 EOF
 )
-    url_encoded_payload=$(url_encode "${payload}")
-
     env=$(get_env)
     if [ "${env}" = "stage" ]; then
         BASE_ACTIVATION_URI="${STAGE_URI}"
@@ -615,10 +667,15 @@ EOF
     activation_url="${BASE_ACTIVATION_URI}${ACTIVATION_ENDPOINT}"
 
     print_info "Activating the instance using the provided activation code at ${activation_url}."
-    if ! response=$(curl_request "POST" "${activation_url}" "${url_encoded_payload}"); then
-        print_error "Failed to activate the instance using the activation code. Please check your activation code and node name."
+    if ! response=$(curl_request "POST" "${activation_url}" "${payload}"); then
+        print_error "Failed to activate the instance using the activation code."
+        if [ -n "${response}" ]; then
+            print_error "Response: ${response}"
+        fi
         return 1
     fi
+
+    print_info "Instance activated successfully using the provided activation code."
 }
 
 ###############################################################################
@@ -660,14 +717,15 @@ curl_request()
 {
     method=$1
     url=$2
-    data=$3
     if [ -z "${method}" ] || [ -z "${url}" ]; then
         print_error "curl_request: method and url are required parameters."
         return 1
     fi
 
+    data="$3"
+
     accept_header="accept: application/json"
-    auth_header="Authorization: Bearer ${ACTIVATION_CODE}"
+    auth_header="Authorization: Activation ${ACTIVATION_CODE}"
     content_header="Content-Type: application/json"
 
     # Append the http_code/response code to the end of the json response to provide better error handling experience
@@ -688,10 +746,13 @@ curl_request()
         fi
         return 1
     elif [ "${http_code}" -eq 401 ]; then
-        print_error "Cannot connect to the API - UNAUTHORIZED. (ensure that the API Key is valid)"
+        print_error "Cannot connect to the API - UNAUTHORIZED. (ensure that the activation code is valid)"
         return 1
-    elif [ "${http_code}" -ge 402 ]; then
-        print_error "Cannot connect to the API, check your internet connectivity - HTTP Code: ${http_code}"
+    elif [ "${http_code}" -eq 409 ]; then
+        print_error "Cannot connect to the API - CONFLICT. The activation code may have already been used."
+        return 1
+    elif [ "${http_code}" -eq 500 ]; then
+        print_error "Cannot connect to the API - INTERNAL SERVER ERROR. Please try again later."
         return 1
     fi
 
@@ -720,52 +781,58 @@ curl_request()
 ###############################################################################
 # MAIN
 ###############################################################################
-if command -v catchpoint >/dev/null 2>&1; then
+if ! parse_args "$@"; then
+    exit 1
+fi
+
+if [ "${SKIP_INSTALL}" != "true" ] && command -v catchpoint >/dev/null 2>&1; then
     print_info "The SyntheticAgent is already installed. Skipping installation."
     print_info "If you want to reinstall, please uninstall the existing SyntheticAgent first."
     print_info "If you want to upgrade, run 'catchpoint upgrade' instead of this script."
     exit 0
 fi
 
-if ! parse_args "$@"; then
-    exit 1
-fi
-
 if ! confirm_is_activateable; then
     exit 1
 fi
 
-if ! confirm_prerequisites; then
-    exit 1
-fi
+if [ "${SKIP_INSTALL}" = "true" ]; then
+    print_info "Skipping installation of the Catchpoint SyntheticAgent as per user request."
+else
+    print_info "Proceeding with the installation of the Catchpoint SyntheticAgent."
 
-if ! install_repo; then
-    exit 1
-fi
+    if ! confirm_prerequisites; then
+        exit 1
+    fi
 
-if ! ${CACHE_UPDATE_COMMAND}; then
-    print_error "Failed to update package manager cache."
-    exit 1
-fi
+    if ! install_repo; then
+        exit 1
+    fi
 
-if ! set_machine_id; then
-    print_error "Failed to set machine ID in configuration."
-    exit 1
-fi
+    if ! ${CACHE_UPDATE_COMMAND}; then
+        print_error "Failed to update package manager cache."
+        exit 1
+    fi
 
-if ! set_instance_name; then
-    print_error "Failed to set instance name in configuration."
-    exit 1
-fi
+    if ! set_machine_id; then
+        print_error "Failed to set machine ID in configuration."
+        exit 1
+    fi
 
-#shellcheck disable=SC2086# We need globbing here for EXCLUDE_SWITCHES and PACKAGES_TO_INSTALL.
-if ! ${INSTALL_PACKAGES_COMMAND} ${EXCLUDE_SWITCHES} ${PACKAGES_TO_INSTALL}; then
-    print_error "Failed to install packages: ${PACKAGES_TO_INSTALL}"
-    exit 1
-fi
+    if ! set_instance_name; then
+        print_error "Failed to set instance name in configuration."
+        exit 1
+    fi
 
-print_info "Catchpoint installation completed successfully."
-print_info "Installed packages: ${PACKAGES_TO_INSTALL}"
+    #shellcheck disable=SC2086# We need globbing here for EXCLUDE_SWITCHES and PACKAGES_TO_INSTALL.
+    if ! ${INSTALL_PACKAGES_COMMAND} ${EXCLUDE_SWITCHES} ${PACKAGES_TO_INSTALL}; then
+        print_error "Failed to install packages: ${PACKAGES_TO_INSTALL}"
+        exit 1
+    fi
+
+    print_info "Catchpoint installation completed successfully."
+    print_info "Installed packages: ${PACKAGES_TO_INSTALL}"
+fi
 
 if ! activate_instance; then
     exit 1

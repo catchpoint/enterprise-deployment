@@ -22,7 +22,12 @@ Displays help/usage information.
 * [set_instance_name](#set_instance_name)
 * [get_env](#get_env)
 * [get_os](#get_os)
+* [get_machine_id](#get_machine_id)
 * [activate_instance](#activate_instance)
+* [activate_instance_with_cli](#activate_instance_with_cli)
+* [activate_instance_with_code](#activate_instance_with_code)
+* [url_encode](#url_encode)
+* [curl_request](#curl_request)
 
 ### show_help
 
@@ -38,13 +43,19 @@ _Function has no arguments._
 
 Parse the incoming arguments.
 
+#### Arguments
+
+* **$1** (string): All arguments to parse.
+
 #### Variables set
 
-* **API_TOKEN** (string): API token provided via `--api-key` for post-install activation.
-* **NODE_NAME** (string): Node name provided via `--node` for post-install activation.
-* **MACHINE_ID** (string): Optional 12-character alphanumeric machine ID override provided via `--machine-id`.
-* **INSTANCE_NAME** (string): Optional instance/hostname override provided via `--instance-name`.
-* **INSTALL_PLAYWRIGHT / INSTALL_LEGACY** (boolean): Whether to install the optional Playwright and legacy monitor packages.
+* **API_TOKEN** (string): API token for activation (from --api-key).
+* **NODE_NAME** (string): Node name for activation (from --node).
+* **ACTIVATION_CODE** (string): Activation code for activation (from --code).
+* **MACHINE_ID** (string): 12-character machine ID override (from --machine-id).
+* **INSTANCE_NAME** (string): Instance name/hostname override (from --instance-name).
+* **INSTALL_PLAYWRIGHT/INSTALL_LEGACY** (bool): Whether to install optional Playwright and legacy monitor packages.
+* **SKIP_INSTALL** (bool): Whether to skip the installation of the Catchpoint SyntheticAgent.
 
 #### Exit codes
 
@@ -117,9 +128,12 @@ _Function has no arguments._
 
 ### confirm_is_activateable
 
-Checks if both API_TOKEN and NODE_NAME are provided for activation.
-If only one is provided, it prints an error message and returns a non-zero exit code.
-If neither is provided, it prints an informational message and sleeps for 5 seconds
+Checks if both API_TOKEN and NODE_NAME or the ACTIVATION_CODE are
+provided.
+If only one of API_TOKEN or NODE_NAME is provided, it prints an error message
+and returns a non-zero exit code.
+If ACTIVATION_CODE is provided, it will be used for activation instead of API_TOKEN and NODE_NAME.
+If none are provided, it prints an informational message and sleeps for 5 seconds
 to allow the user to cancel if they want to provide these values.
 
 _Function has no arguments._
@@ -207,9 +221,28 @@ _Function has no arguments._
 
 * The operating system and version (e.g., "Ubuntu 20", "Red Hat 8", "Amazon Linux", "Rocky Linux", or "Catchpoint Appliance").
 
+### get_machine_id
+
+Retrieves the machine ID using the Catchpoint CLI. If the Catchpoint 
+CLI is not installed, it prints an error message and returns a non-zero exit code.
+
+_Function has no arguments._
+
+#### Exit codes
+
+* **0**: If the machine ID is retrieved successfully.
+* **1**: If the Catchpoint CLI is not installed or if there is an error retrieving the machine ID.
+
+#### Output on stdout
+
+* The machine ID if the Catchpoint CLI is installed and the command succeeds.
+
 ### activate_instance
 
-Activates the Catchpoint instance using the provided API token and node name.
+Activates the Catchpoint instance.
+if ACTIVATION_CODE is specified, the activation uses a direct curl call to the endpoint.
+Otherwise, if API_TOKEN and NODE_NAME are provided, the activation uses the 
+Catchpoint CLI with the provided API token and node name.
 If either the API token or node name is missing, it prints an informational message and skips activation.
 
 _Function has no arguments._
@@ -218,4 +251,63 @@ _Function has no arguments._
 
 * **0**: If activation is successful or skipped due to missing credentials.
 * **1**: If activation fails due to an error.
+
+### activate_instance_with_cli
+
+Activates the Catchpoint instance using the Catchpoint CLI with 
+the provided API token and node name.
+
+_Function has no arguments._
+
+#### Exit codes
+
+* **0**: If activation is successful.
+* **1**: If activation fails due to an error.
+
+### activate_instance_with_code
+
+Activates the Catchpoint instance using the provided ACTIVATION_CODE 
+by making a direct API call to the activation endpoint.
+
+_Function has no arguments._
+
+#### Exit codes
+
+* **0**: If activation is successful.
+* **1**: If activation fails due to an error.
+
+### url_encode
+
+URL-encodes the provided string using Python's urllib library. 
+It first checks for the availability of Python 3, and if not found, it falls 
+back to a specific Catchpoint Python interpreter. The encoded string is printed to stdout.
+
+#### Arguments
+
+* **$1** (string): The string to be URL-encoded.
+
+#### Output on stdout
+
+* The URL-encoded string.
+
+### curl_request
+
+Makes a curl request to the specified URL with the given method 
+and data. It handles HTTP response codes and errors, returning the JSON 
+response if successful.
+
+#### Arguments
+
+* **$1** (string): The HTTP method (e.g., GET, POST).
+* **$2** (string): The URL to which the request is made.
+* **$3** (string): [Optional] The data to be sent with the request (for POST/PUT requests).
+
+#### Exit codes
+
+* **0**: If the request is successful and returns a valid JSON response.
+* **1**: If there is an error with the request or response.
+
+#### Output on stdout
+
+* The JSON response from the server if the request is successful.
 

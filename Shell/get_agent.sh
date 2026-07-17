@@ -653,7 +653,8 @@ activate_instance_with_code() {
 {
     "os": "${os}",
     "machineid": "${mid}",
-    "hostname": "$(url_encode "${instance_name}")"
+    "hostname": "$(url_encode "${instance_name}")",
+    "token": "${ACTIVATION_CODE}"
 }
 EOF
 )

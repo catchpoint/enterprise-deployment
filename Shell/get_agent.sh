@@ -41,7 +41,7 @@ readonly COMMENG_CONF="/etc/catchpoint.d/CommEng.conf"
 
 readonly STAGE_URI="https://iostage.catchpoint.com"
 readonly QA_URI="https://ioqa.catchpoint.com"
-readonly ACTIVATION_ENDPOINT="/api/v4/instances/activate"
+readonly ACTIVATION_ENDPOINT="/api/v4/instances/register"
 
 #########################################################################################
 # RHEL
@@ -481,6 +481,25 @@ get_env() {
 ###############################################################################
 # @description Determines the operating system and version of the current machine.
 # Note: this function returns the strings based on what the production OS values are.
+# The OS IDs are stored in the DB, so we have to map to the appropriate one.  * indicates that the OS is not supported by this install script.
+# 2 - Ubuntu 14*
+# 3 - Ubuntu 16*
+# 4 - CentOS 7*
+# 5 - Fedora*
+# 6 - Red Hat 7*
+# 7 - Amazon Linux
+# 8 - Ubuntu 18*
+# 9 - Windows Server 2016*
+# 10 - CentOS 8*
+# 11 - Red Hat 8
+# 12 - Windows Server 2019*
+# 13 - Catchpoint Applicance
+# 14 - Docker
+# 15 - Oracle Linux 8
+# 16 - Rocky Linux
+# 17 - Ubuntu 22
+# 18 - RHEL9
+# 19 - Ubuntu 24
 #
 # @noargs
 #
@@ -495,25 +514,34 @@ get_os() {
     version_major=$(awk -F= '/^VERSION_ID=/{gsub(/"/,"",$2); split($2,a,"."); print a[1]; exit}' "${release_file}" 2>/dev/null || echo "")
 
     if [ "${is_ubuntu}" = true ]; then
+        if [ "${version_major}" = "22" ]; then
+            # Prod only recognizes one version of Ubuntu, so we will return "Ubuntu 20" regardless of the actual version.
+            echo "17"
+            return
+        elif [ "${version_major}" = "24" ]; then
+            # Prod only recognizes one version of Ubuntu, so we will return "Ubuntu 20" regardless of the actual version.
+            echo "19"
+            return
+        fi
         echo "Ubuntu ${version_major}"
     elif [ "${is_oracle_linux}" = true ]; then
         # Prod only recognizes one version of Oracle Linux, so we will return "Oracle Linux 8" regardless of the actual version.
-        echo "Oracle Linux 8"
+        echo "15"
     elif [ "${is_amazon}" = true ]; then
-        echo "Amazon Linux"
+        echo "7"
     elif [ "${is_rocky}" = true ]; then
-        echo "Rocky Linux"
+        echo "16"
     elif [ "${is_redhat}" = true ]; then
         # if major is 7 or 8, return Red Hat {version}.
         if [ "${version_major}" = "7" ] || [ "${version_major}" = "8" ]; then
-            echo "Red Hat ${version_major}"
+            echo "11"
         else
         # if major is 9 (or greater), return RHEL9 to match what's in prod OS values.
-            echo "RHEL9"
+            echo "18"
         fi
     else
         # If we can't determine the OS, we will return "Catchpoint Appliance" because there's no "unknown" catch-all.
-        echo "Catchpoint Appliance"
+        echo "13"
     fi
 }
 

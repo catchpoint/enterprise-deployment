@@ -689,13 +689,13 @@ activate_instance_with_code() {
         print_error "Failed to retrieve machine ID. Cannot activate the instance."
         return 1
     fi
-
+    
     instance_name=${INSTANCE_NAME:-$(get_hostname)}
 
     payload=$(cat <<EOF
 {
     "osId": ${os},
-    "machineiD": "${mid}",
+    "machineID": "${mid}",
     "hostName": "$(url_encode "${instance_name}")",
     "claimToken": "${ACTIVATION_CODE}"
 }

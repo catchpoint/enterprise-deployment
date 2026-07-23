@@ -666,7 +666,7 @@ activate_instance_with_cli() {
 # @exitcode 0 If activation is successful.
 # @exitcode 1 If activation fails due to an error.
 activate_instance_with_code() {
-    os=$(url_encode "$(get_os)")
+    os=$(get_os)
 
     # The MID source-of-truth should be what the agent is using right now, since the single-use flow
     # doesn't require the user to provide it.
@@ -679,10 +679,10 @@ activate_instance_with_code() {
 
     payload=$(cat <<EOF
 {
-    "os": "${os}",
-    "machineid": "${mid}",
-    "hostname": "$(url_encode "${instance_name}")",
-    "token": "${ACTIVATION_CODE}"
+    "osId": ${os},
+    "machineiD": "${mid}",
+    "hostName": "$(url_encode "${instance_name}")",
+    "claimToken": "${ACTIVATION_CODE}"
 }
 EOF
 )

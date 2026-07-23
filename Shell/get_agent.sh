@@ -96,6 +96,7 @@ OPTIONS:
     --skip-playwright    [Optional] Skip the installation of the Playwright package.
     --skip-legacy        [Optional] Skip the installation of the syntheticagent-legacy package.
     --skip-install       [Optional] Skip the installation of the Catchpoint SyntheticAgent (for reactivation purposes).
+    -e, --env            [Optional] Specify the environment to use for activation (stage or qa). Defaults to production.
     -h, --help           Show this help message and exit.
     -v, --version        Show the script version and exit.
 EOF
@@ -113,6 +114,7 @@ EOF
 # @set INSTANCE_NAME string Instance name/hostname override (from --instance-name).
 # @set INSTALL_PLAYWRIGHT/INSTALL_LEGACY bool Whether to install optional Playwright and legacy monitor packages.
 # @set SKIP_INSTALL bool Whether to skip the installation of the Catchpoint SyntheticAgent.
+# @set ENV string The environment to use for activation (from --env).
 #
 # @exitcode 0 for success.
 # @exitcode 1 for failure.
@@ -186,6 +188,15 @@ parse_args() {
             -v|--version)
                 echo "${SCRIPT_VERSION}"
                 exit 0
+                ;;
+            -e|--env)
+                if [ -n "$2" ]; then
+                    ENV="$2"
+                    shift 2
+                else
+                    print_error "Missing argument for --env. Please provide a valid environment (stage or qa)."
+                    return 1
+                fi
                 ;;
             *)
                 print_error "Unknown option: $1"
@@ -469,7 +480,11 @@ set_instance_name() {
 # @stdout The value of the ActiveConfigurationEnvironment variable, or an empty string if not found.
 get_env() {
     env_key="ActiveConfigurationEnvironment"
-    if grep -q "^${env_key}=" "${COMMENG_CONF}" 2>/dev/null; then
+    # The command line args override the config file, so if ENV is set, ret     urn it.
+    if [ -n "${ENV}" ]; then
+        echo "${ENV}"
+        return
+    elif grep -q "^${env_key}=" "${COMMENG_CONF}" 2>/dev/null; then
         # Get the value of the environment variable from the configuration file, removing any surrounding quotes and convert to lowercase.
         env_value=$(grep "^${env_key}=" "${COMMENG_CONF}" | cut -d '=' -f 2 | tr -d '"' | tr '[:upper:]' '[:lower:]')
         echo "${env_value}"

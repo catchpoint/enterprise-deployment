@@ -711,6 +711,16 @@ EOF
     activation_url="${BASE_ACTIVATION_URI}${ACTIVATION_ENDPOINT}"
 
     print_info "Activating the instance using the provided activation code at ${activation_url}."
+    # Log the activation payload in a readable format for debugging/audit purposes.
+    if command -v jq >/dev/null 2>&1; then
+        pretty_payload=$(echo "${payload}" | jq . 2>/dev/null || echo "${payload}")
+        print_info "Activation payload:\n${pretty_payload}"
+    else
+        print_info "Activation payload: ${payload}"
+    fi
+
+    
+    print_info "Activating the instance using the provided activation code at ${activation_url}."
     if ! response=$(curl_request "POST" "${activation_url}" "${payload}"); then
         print_error "Failed to activate the instance using the activation code."
         if [ -n "${response}" ]; then

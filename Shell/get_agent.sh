@@ -364,6 +364,13 @@ install_repo(){
         print_info "Configuring Catchpoint YUM repository for Red Hat-based distribution."
         #shellcheck disable=SC1083
         distro_version=$(rpm -E %{rhel})
+
+        # Special case: we support amazon 2023 but it does not set the 'rhel' macro. 
+        # If %{rhel} is not set, check for amzn2023 and then override the distro.
+        if [ "${distro_version}" = "%{rhel}" ] && [ -n "$(rpm -E '%{?amzn}')" ]; then
+            distro_version="9"
+        fi
+
         case "${distro_version}" in
             8)
                 #shellcheck disable=SC2059# The CATCHPOINT_RHEL_REPO includes the format specifier.
@@ -534,7 +541,7 @@ activate_instance() {
     fi
 
     print_info "Activating the instance with the following command:"
-print_info "catchpoint activate --api-key <REDACTED> --node ${NODE_NAME} --os ${os} ${extra_switches} --yes"
+    print_info "catchpoint activate --api-key <REDACTED> --node ${NODE_NAME} --os ${os} ${extra_switches} --yes"
     # shellcheck disable=SC2086 # We need globbing here for the extra switches.
     if ! catchpoint activate --api-key "${API_TOKEN}" --node "${NODE_NAME}" --os "${os}" ${extra_switches} --yes; then
         print_error "Failed to activate the instance with the provided API token and node name."

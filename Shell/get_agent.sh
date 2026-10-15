@@ -6,12 +6,11 @@
 #
 # History:
 #   1.0.0 - Initial version
-#   1.0.1 - Fix for Amazon2023 distribution detection
-#   1.0.2 - Added Debian codename handling (Ubuntu 22, 24)
+#   1.0.1 - Added Debian codename handling (Ubuntu 22, 24)
 #           Added aarch64 architecture handling
 #
 
-readonly SCRIPT_VERSION="1.0.2"
+readonly SCRIPT_VERSION="1.0.1"
 
 # Defaults
 CACHE_UPDATE_COMMAND=""

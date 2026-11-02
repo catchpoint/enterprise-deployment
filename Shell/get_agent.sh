@@ -1,8 +1,16 @@
 #!/bin/sh
 # @file get_agent.sh
 # @brief This script installs the Catchpoint SyntheticAgent on a Linux system. It supports both Debian-based and Red Hat-based distributions.
+#
+# @description Installs the Catchpoint SyntheticAgent on a Linux system, supporting both Debian-based and Red Hat-based distributions.
+#
+# History:
+#   1.0.0 - Initial version
+#   1.0.1 - Added Debian codename handling (Ubuntu 22, 24)
+#           Added aarch64 architecture handling
+#
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.0.1"
 
 # Defaults
 CACHE_UPDATE_COMMAND=""
@@ -16,6 +24,7 @@ INSTALL_LEGACY="true"
 API_TOKEN=""
 NODE_NAME=""
 EXCLUDE_SWITCHES=""
+ARCHITECTURE=""
 
 if command -v tput > /dev/null 2>&1 && [ "$(tput colors 2> /dev/null || echo 0)" -ge 8 ]; then
     RED=$(tput setaf 1)
@@ -41,8 +50,10 @@ readonly CATCHPOINT_RHEL_REPO_FILE="/etc/yum.repos.d/catchpoint.repo"
 
 #########################################################################################
 # DEB
-readonly CATCHPOINT_DEB_REPO="https://proddebrepo.catchpoint.net/repo/proddebrepo.list"
-readonly CATCHPOINT_DEB_REPO_FILE="/etc/apt/sources.list.d/catchpoint.list"
+readonly CATCHPOINT_DEB_REPO="https://proddebrepo.catchpoint.net/repo/"
+readonly CATCHPOINT_DEB_DEFAULT_REPO_FILE="proddebrepo.list"
+readonly CATCHPOINT_DEB_CODENAME_REPO_FILE="proddebrepo_%s.list"
+readonly CATCHPOINT_DEB_LOCAL_REPO_FILE="/etc/apt/sources.list.d/catchpoint.list"
 readonly CATCHPOINT_DEB_KEY_URL="https://proddebrepo.catchpoint.net/repo/prod-key.asc"
 readonly CATCHPOINT_DEB_KEY_LEGACY_DIR="/etc/apt/trusted.gpg.d"
 
@@ -67,7 +78,7 @@ DESCRIPTION:
     ability to run Playwright or Puppeteer monitors.
 
     To skip the installation of the syntheticagent-legacy package, use the --skip-legacy option. This removes
-    the ability to run legacy monitors (e.g. Chrome, Selenium).
+    the ability to run legacy monitors (e.g. Chrome, Selenium). This is forced on arm architectures (aarch64).
 
     Machine ID will default to the system's primary network adapter's MAC address if not provided. This can
     be overridden with the '--machine-id' option. The machine ID must be a 12-character alphanumeric string.
@@ -258,6 +269,7 @@ confirm_is_activateable() {
 #
 # @noargs
 #
+# @sets ARCHITECTURE string The system architecture (e.g., 'x86_64', 'aarch64').
 # @sets CACHE_UPDATE_COMMAND string The command to update the package manager's cache.
 # @sets INSTALL_PACKAGES_COMMAND string The command to install packages using the package manager.
 # @sets PACKAGES_TO_INSTALL string The name of the Catchpoint package to install.
@@ -268,9 +280,16 @@ confirm_is_activateable() {
 # @exitcode 1 If any prerequisites are missing or the distribution is unsupported.
 confirm_prerequisites() {
     # Block if not x86_64 architecture
-    if [ "$(uname -m)" != "x86_64" ]; then
-        print_error "Unsupported architecture: $(uname -m). This script only supports x86_64 architecture."
+    ARCHITECTURE="$(uname -m)"
+    print_info "Detected architecture: ${ARCHITECTURE}"
+    if [ "${ARCHITECTURE}" != "x86_64" ] && [ "${ARCHITECTURE}" != "aarch64" ]; then
+        print_error "Unsupported architecture: ${ARCHITECTURE}. This script only supports x86_64 and aarch64 architectures."
         return 1
+    fi
+
+    if [ "${ARCHITECTURE}" = "aarch64" ]; then
+        INSTALL_LEGACY="false"
+        print_warning "Running on aarch64 architecture. Legacy installation will be disabled."
     fi
 
     if ! is_root; then
@@ -314,6 +333,11 @@ confirm_prerequisites() {
         else
             EXCLUDE_SWITCHES="${EXCLUDE_SWITCHES} --exclude=syntheticagent-legacy"
         fi
+        # On aarch64, all PACKAGES are lowercase.
+        if [ "${ARCHITECTURE}" = "aarch64" ]; then
+            PACKAGES_TO_INSTALL=$(echo "${PACKAGES_TO_INSTALL}" | tr '[:upper:]' '[:lower:]')
+            EXCLUDE_SWITCHES=$(echo "${EXCLUDE_SWITCHES}" | tr '[:upper:]' '[:lower:]')
+        fi
         DISTRO_FLAVOR="rhel"
     else
         print_error "Unsupported package manager. This script supports apt-get and yum."
@@ -343,9 +367,22 @@ install_repo(){
             return 0
         fi
 
+        if ! codename=$(lsb_release -cs) || [ -z "${codename}" ]; then
+            print_error "Failed to detect the codename for the Debian-based distribution."
+            return 1
+        # We currently only support Ubuntu 22 (jammy) and 24 (noble) list files.
+        elif [ "${codename}" = "noble" ] || [ "${codename}" = "jammy" ]; then
+            # shellcheck disable=SC2059 # Allow printf with variable format string.
+            sourcefile=$(printf "${CATCHPOINT_DEB_CODENAME_REPO_FILE}" "${codename}")
+        # RPI usecase - fallback to the default repository file if the codename is not recognized.
+        # In this flow, RPI resolves third-party deps (e.g. dotnet) from its own stream.
+        else
+            sourcefile="${CATCHPOINT_DEB_DEFAULT_REPO_FILE}"
+        fi
+
         print_info "Configuring Catchpoint APT repository for Debian-based distribution."
-        if ! curl -fsSL "${CATCHPOINT_DEB_REPO}" -o "${CATCHPOINT_DEB_REPO_FILE}"; then 
-            print_error "Failed to download Catchpoint APT repository list from ${CATCHPOINT_DEB_REPO}."
+        if ! curl -fsSL "${CATCHPOINT_DEB_REPO}${sourcefile}" -o "${CATCHPOINT_DEB_LOCAL_REPO_FILE}"; then 
+            print_error "Failed to download Catchpoint APT repository list from ${CATCHPOINT_DEB_REPO}${sourcefile}."
             return 1
         fi
 
@@ -554,15 +591,15 @@ activate_instance() {
 ###############################################################################
 # MAIN
 ###############################################################################
+if ! parse_args "$@"; then
+    exit 1
+fi
+
 if command -v catchpoint >/dev/null 2>&1; then
     print_info "The SyntheticAgent is already installed. Skipping installation."
     print_info "If you want to reinstall, please uninstall the existing SyntheticAgent first."
     print_info "If you want to upgrade, run 'catchpoint upgrade' instead of this script."
     exit 0
-fi
-
-if ! parse_args "$@"; then
-    exit 1
 fi
 
 if ! confirm_is_activateable; then

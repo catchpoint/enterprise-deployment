@@ -61,12 +61,15 @@ $Options = @{
     ContainerIdFile = '--cidfile'
     AddCapability = '--cap-add'
     Remove = '--rm'
+    Detach = '--detach'
+    ShortDetach = '-d'
 }
 $Commands = @{
     WslVersion = '--version'
     WslcVersion = 'version'
     Run = 'run'
     Container = 'container'
+    List = 'list'
     Kill = 'kill'
 }
 $Patterns = @{
@@ -128,6 +131,7 @@ strip $($Options.AddCapability); without $BrowserCapability, browser-based tests
 
 The container runs in the foreground and is removed when it stops (--rm).
 Ctrl+C kills the container started by this launcher.
+With $($Options.ShortDetach) or $($Options.Detach), the container runs detached and is left running when the launcher exits.
 Checks: virtualization, installed WSL, and wslc version.
 Failures print a specific reason to stderr and return a nonzero exit code.
 Normally the script returns wslc run's exit code; Ctrl+C returns $($ExitCodes.Interrupted).
@@ -164,12 +168,15 @@ function Invoke-NativeProcess {
     $startInfo.Arguments = $quoted -join ' '
     $startInfo.RedirectStandardOutput = [bool] $Capture
     $startInfo.RedirectStandardError = [bool] $Capture
+    $startInfo.RedirectStandardInput = [bool] $Capture
     $startInfo.CreateNoWindow = [bool] $Capture
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
     try {
         [void] $process.Start()
         if ($Capture) {
+            # Close stdin so prechecks (e.g. the WSL install prompt) get EOF instead of waiting for a key.
+            $process.StandardInput.Close()
             # Drain both streams concurrently to avoid pipe-buffer deadlocks.
             $stdoutTask = $process.StandardOutput.ReadToEndAsync()
             $stderrTask = $process.StandardError.ReadToEndAsync()
@@ -228,6 +235,16 @@ function Stop-StartedContainer {
     }
 }
 
+function Test-ContainerRunning {
+    param([string] $WslcPath, [pscustomobject] $State)
+    if (-not $State.Id) { return $false }
+    try {
+        $result = Invoke-NativeProcess -FilePath $WslcPath -ArgumentList @($Commands.Container, $Commands.List, '--quiet', '--no-trunc') -Capture
+        return $result.ExitCode -eq $ExitCodes.Success -and @($result.Stdout -split '\s+') -contains $State.Id
+    }
+    catch { return $false }
+}
+
 function Test-BrowserCapability {
     param([string[]] $Arguments)
     for ($i = 0; $i -lt $Arguments.Count; $i++) {
@@ -241,6 +258,11 @@ function Test-BrowserCapability {
         }
     }
     return $false
+}
+
+function Test-DetachedRun {
+    param([string[]] $Arguments)
+    return @($Arguments | Where-Object { $_ -ceq $Options.ShortDetach -or $_ -ceq $Options.Detach }).Count -gt 0
 }
 
 function Get-RequiredExecutable {
@@ -406,6 +428,7 @@ public static class CatchpointInterrupt
 
 function Invoke-Container {
     param([string] $WslcPath, [string] $ImageReference, [string[]] $RuntimeArguments)
+    $detached = Test-DetachedRun -Arguments $RuntimeArguments
     Register-InterruptHandlerType
     $cidFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), ($ContainerIdFileFormat -f [guid]::NewGuid().ToString('N')))
     $containerState = [pscustomobject]@{ Id = $null; KillAttempted = $false }
@@ -430,13 +453,15 @@ function Invoke-Container {
     finally {
         # Neither helper throws, so every cleanup step below always runs.
         Update-ContainerId -CidFile $cidFile -State $containerState
-        if ([CatchpointInterrupt]::Requested) {
+        # wslc also receives Ctrl+C and can exit before our handler sets the flag, so check the container itself.
+        # A detached wslc run returns while the container keeps running, so it must not be killed.
+        if ([CatchpointInterrupt]::Requested -or (-not $detached -and (Test-ContainerRunning -WslcPath $WslcPath -State $containerState))) {
             Stop-StartedContainer -WslcPath $WslcPath -CidFile $cidFile -State $containerState
         }
         [Console]::remove_CancelKeyPress($cancelHandler)
         if ([System.IO.File]::Exists($cidFile)) { [System.IO.File]::Delete($cidFile) }
     }
-    if ([CatchpointInterrupt]::Requested) { return $ExitCodes.Interrupted }
+    if ([CatchpointInterrupt]::Requested -or $containerState.KillAttempted) { return $ExitCodes.Interrupted }
     if ($runExitCode -ne $ExitCodes.Success) {
         if ($containerState.Id) {
             [Console]::Error.WriteLine("[$($Reasons.ContainerExitStatus)] wslc run returned code $runExitCode.")

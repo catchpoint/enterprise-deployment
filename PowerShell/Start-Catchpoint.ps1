@@ -203,7 +203,7 @@ function Update-ContainerId {
     param([string] $CidFile, [pscustomobject] $State)
     if (-not $State.Id -and [System.IO.File]::Exists($CidFile)) {
         try { $candidate = [System.IO.File]::ReadAllText($CidFile).Trim() }
-        catch [System.IO.IOException] { return } # WSLC may still be writing it.
+        catch [System.IO.IOException], [System.UnauthorizedAccessException] { return } # WSLC may still be writing it.
         if ($candidate -match $Patterns.ContainerId) { $State.Id = $candidate }
     }
 }
@@ -279,21 +279,21 @@ function Test-NativePrecheck {
     }
 }
 
-try {
-    $image = $EnterpriseImage
-    $tag = $DefaultImageTag
-    $runtimeArguments = New-Object 'System.Collections.Generic.List[string]'
-    $forwarding = $false
-    for ($index = 0; $index -lt $launcherArguments.Count; $index++) {
-        $argument = [string] $launcherArguments[$index]
-        if ($forwarding) {
-            $runtimeArguments.Add($argument)
-            continue
-        }
-        if ($argument -ceq $Options.Separator) { $forwarding = $true; continue }
+function Read-LauncherArguments {
+    param([string[]] $Arguments)
+    $parsed = [pscustomobject]@{
+        Image = $EnterpriseImage
+        Tag = $DefaultImageTag
+        HelpRequested = $false
+        RuntimeArguments = @()
+    }
+    $index = 0
+    while ($index -lt $Arguments.Count) {
+        $argument = $Arguments[$index]
+        if ($argument -ceq $Options.Separator) { $index++; break }
         if ($argument -ceq $Options.Help -or $argument -ceq $Options.ShortHelp) {
-            Show-LauncherHelp
-            exit $ExitCodes.Success
+            $parsed.HelpRequested = $true
+            return $parsed
         }
         $option = $argument
         $value = $null
@@ -302,86 +302,88 @@ try {
             $option = $argument.Substring(0, $equalsIndex)
             $value = $argument.Substring($equalsIndex + 1)
         }
-        if ($option -cnotin @($Options.Image, $Options.Version)) {
-            $forwarding = $true
-            $runtimeArguments.Add($argument)
-            continue
-        }
+        # The first unrecognized argument starts runtime-option forwarding.
+        if ($option -cnotin @($Options.Image, $Options.Version)) { break }
+        $index++
         if ($equalsIndex -lt 0) {
-            $index++
-            if ($index -ge $launcherArguments.Count) {
+            if ($index -ge $Arguments.Count) {
                 Stop-Launcher $ExitCodes.InvalidArgument $Reasons.InvalidArgument "$option requires a value. Run with --help for usage."
             }
-            $value = [string] $launcherArguments[$index]
+            $value = $Arguments[$index]
+            $index++
         }
-        switch -CaseSensitive ($option) {
-            { $_ -ceq $Options.Image } { $image = $value }
-            { $_ -ceq $Options.Version } { $tag = $value }
-        }
+        if ($option -ceq $Options.Image) { $parsed.Image = $value } else { $parsed.Tag = $value }
     }
-    if ($image -cnotin $SupportedImages) {
-        Stop-Launcher $ExitCodes.InvalidArgument $Reasons.InvalidImage "Invalid image '$image'. Use $($SupportedImages -join ' or ')."
+    $parsed.RuntimeArguments = @($Arguments | Select-Object -Skip $index)
+    return $parsed
+}
+
+function Assert-ValidArguments {
+    param([string] $Image, [string] $Tag, [string[]] $RuntimeArguments)
+    if ($Image -cnotin $SupportedImages) {
+        Stop-Launcher $ExitCodes.InvalidArgument $Reasons.InvalidImage "Invalid image '$Image'. Use $($SupportedImages -join ' or ')."
     }
-    if ($tag -cnotmatch $Patterns.ImageTag) {
+    if ($Tag -cnotmatch $Patterns.ImageTag) {
         Stop-Launcher $ExitCodes.InvalidArgument $Reasons.InvalidTag 'The image tag must be 1-128 ASCII letters, digits, underscores, dots, or hyphens, and cannot start with a dot or hyphen.'
     }
-    if (@($runtimeArguments | Where-Object { $_ -ceq $Options.ContainerIdFile -or $_ -clike ($Options.ContainerIdFile + '=*') }).Count -gt 0) {
+    if (@($RuntimeArguments | Where-Object { $_ -ceq $Options.ContainerIdFile -or $_ -clike ($Options.ContainerIdFile + '=*') }).Count -gt 0) {
         Stop-Launcher $ExitCodes.InvalidArgument $Reasons.InvalidArgument '--cidfile is managed by the launcher so Ctrl+C can stop the started container.'
     }
+}
 
+function Assert-Virtualization {
     Write-Host 'Checking virtualization...'
     try {
         $computer = Get-CimInstance -ClassName Win32_ComputerSystem -Property HypervisorPresent -ErrorAction Stop
         # An active hypervisor can mask the CPU firmware flag. Accept it first.
-        $virtualizationEnabled = $computer.HypervisorPresent -eq $true
-        if (-not $virtualizationEnabled) {
-            $processors = @(Get-CimInstance -ClassName Win32_Processor -Property VirtualizationFirmwareEnabled -ErrorAction Stop)
-            if ($processors.Count -eq 0 -or @($processors | Where-Object { $null -eq $_.VirtualizationFirmwareEnabled }).Count -gt 0) {
-                throw 'CIM did not report processor virtualization status.'
-            }
-            $virtualizationEnabled = @($processors | Where-Object { $_.VirtualizationFirmwareEnabled -ne $true }).Count -eq 0
+        if ($computer.HypervisorPresent -eq $true) { return }
+        $processors = @(Get-CimInstance -ClassName Win32_Processor -Property VirtualizationFirmwareEnabled -ErrorAction Stop)
+        if ($processors.Count -eq 0 -or @($processors | Where-Object { $null -eq $_.VirtualizationFirmwareEnabled }).Count -gt 0) {
+            throw 'CIM did not report processor virtualization status.'
         }
+        $enabled = @($processors | Where-Object { $_.VirtualizationFirmwareEnabled -ne $true }).Count -eq 0
     }
     catch {
         Stop-Launcher $ExitCodes.VirtualizationFailed $Reasons.VirtualizationCheckFailed "Cannot verify virtualization using CIM: $($_.Exception.Message)"
     }
-    if (-not $virtualizationEnabled) {
+    if (-not $enabled) {
         Stop-Launcher $ExitCodes.VirtualizationFailed $Reasons.VirtualizationDisabled 'Hardware virtualization is disabled. Enable Intel VT-x / AMD-V (SVM) in BIOS/UEFI and restart. In a VM, enable nested virtualization on its host.'
     }
+}
 
+function Get-WslcRuntime {
     Write-Host 'Checking WSL installation...'
     $wslPath = Get-RequiredExecutable $WslExecutable $ExitCodes.WslUnavailable $Reasons.WslNotFound $WslAdvice
     [void] (Test-NativePrecheck -FilePath $wslPath -ArgumentList @($Commands.WslVersion) -ExitCode $ExitCodes.WslUnavailable -Reason $Reasons.WslUnavailable -Advice $WslAdvice -RequireVersion)
 
     Write-Host 'Checking WSLC version...'
     $wslcPath = Get-RequiredExecutable $WslcExecutable $ExitCodes.WslcUnavailable $Reasons.WslcNotFound $WslcAdvice
-    $wslcVersionOutput = Test-NativePrecheck -FilePath $wslcPath -ArgumentList @($Commands.WslcVersion) -ExitCode $ExitCodes.WslcUnavailable -Reason $Reasons.WslcVersionFailed -Advice $WslcAdvice -RequireVersion
-    $versionMatch = [regex]::Match($wslcVersionOutput, $Patterns.SemanticVersion)
+    $versionOutput = Test-NativePrecheck -FilePath $wslcPath -ArgumentList @($Commands.WslcVersion) -ExitCode $ExitCodes.WslcUnavailable -Reason $Reasons.WslcVersionFailed -Advice $WslcAdvice -RequireVersion
+    $versionMatch = [regex]::Match($versionOutput, $Patterns.SemanticVersion)
     if (-not $versionMatch.Success) {
         Stop-Launcher $ExitCodes.WslcUnavailable $Reasons.WslcVersionFailed 'wslc version did not include a recognizable semantic version.'
     }
-    $wslcVersion = [version] $versionMatch.Groups['version'].Value
-    $supportsCapabilities = $wslcVersion -ge $MinimumCapabilityVersion
-    if (-not $supportsCapabilities) {
-        Write-Warning "wslc $wslcVersion does not support adding capabilities; any $($Options.AddCapability) options will be ignored."
-        $filteredArguments = New-Object 'System.Collections.Generic.List[string]'
-        for ($index = 0; $index -lt $runtimeArguments.Count; $index++) {
-            $argument = $runtimeArguments[$index]
-            if ($argument -ceq $Options.AddCapability) {
-                if ($index + 1 -lt $runtimeArguments.Count) { $index++ }
-                continue
-            }
-            if ($argument -clike ($Options.AddCapability + '=*')) { continue }
-            $filteredArguments.Add($argument)
-        }
-        $runtimeArguments = $filteredArguments
-    }
-    if ($image -ceq $EnterpriseImage -and -not (Test-BrowserCapability -Arguments $runtimeArguments.ToArray())) {
-        Write-Warning "The $EnterpriseImage image needs $($Options.AddCapability) $BrowserCapability for browser tests. Without it, browser-based tests will not run."
-    }
+    return [pscustomobject]@{ Path = $wslcPath; Version = [version] $versionMatch.Groups['version'].Value }
+}
 
-    if (-not ('CatchpointInterrupt' -as [type])) {
-        Add-Type -TypeDefinition @'
+function Remove-CapabilityArguments {
+    param([string[]] $Arguments)
+    $filtered = New-Object 'System.Collections.Generic.List[string]'
+    for ($index = 0; $index -lt $Arguments.Count; $index++) {
+        $argument = $Arguments[$index]
+        if ($argument -ceq $Options.AddCapability) {
+            if ($index + 1 -lt $Arguments.Count) { $index++ }
+            continue
+        }
+        if ($argument -clike ($Options.AddCapability + '=*')) { continue }
+        $filtered.Add($argument)
+    }
+    return $filtered.ToArray()
+}
+
+function Register-InterruptHandlerType {
+    if ('CatchpointInterrupt' -as [type]) { return }
+    Add-Type -TypeDefinition @'
 using System;
 using System.Threading;
 
@@ -400,15 +402,17 @@ public static class CatchpointInterrupt
     }
 }
 '@
-    }
+}
 
-    $imageReference = "$ImageRepository/${image}:$tag"
+function Invoke-Container {
+    param([string] $WslcPath, [string] $ImageReference, [string[]] $RuntimeArguments)
+    Register-InterruptHandlerType
     $cidFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), ($ContainerIdFileFormat -f [guid]::NewGuid().ToString('N')))
     $containerState = [pscustomobject]@{ Id = $null; KillAttempted = $false }
     # Forward runtime options unchanged before the selected image. The image
     # remains the final argument; its entrypoint receives no appended arguments.
-    $runArguments = @($Commands.Run, $Options.Remove, $Options.ContainerIdFile, $cidFile) + $runtimeArguments.ToArray() + @($imageReference)
-    Write-Host "Starting $imageReference..."
+    $runArguments = @($Commands.Run, $Options.Remove, $Options.ContainerIdFile, $cidFile) + $RuntimeArguments + @($ImageReference)
+    Write-Host "Starting $ImageReference..."
     [CatchpointInterrupt]::Reset()
     $cancelHandler = [System.Delegate]::CreateDelegate(
         [System.ConsoleCancelEventHandler],
@@ -416,26 +420,23 @@ public static class CatchpointInterrupt
     )
     try {
         [Console]::add_CancelKeyPress($cancelHandler)
-        $runExitCode = Invoke-NativeProcess -FilePath $wslcPath -ArgumentList $runArguments -OnPoll {
+        $runExitCode = Invoke-NativeProcess -FilePath $WslcPath -ArgumentList $runArguments -OnPoll {
             Update-ContainerId -CidFile $cidFile -State $containerState
             if ([CatchpointInterrupt]::Requested) {
-                Stop-StartedContainer -WslcPath $wslcPath -CidFile $cidFile -State $containerState
+                Stop-StartedContainer -WslcPath $WslcPath -CidFile $cidFile -State $containerState
             }
         }
     }
     finally {
-        try {
-            Update-ContainerId -CidFile $cidFile -State $containerState
-            if ([CatchpointInterrupt]::Requested) {
-                Stop-StartedContainer -WslcPath $wslcPath -CidFile $cidFile -State $containerState
-            }
+        # Neither helper throws, so every cleanup step below always runs.
+        Update-ContainerId -CidFile $cidFile -State $containerState
+        if ([CatchpointInterrupt]::Requested) {
+            Stop-StartedContainer -WslcPath $WslcPath -CidFile $cidFile -State $containerState
         }
-        finally {
-            [Console]::remove_CancelKeyPress($cancelHandler)
-            if ([System.IO.File]::Exists($cidFile)) { [System.IO.File]::Delete($cidFile) }
-        }
+        [Console]::remove_CancelKeyPress($cancelHandler)
+        if ([System.IO.File]::Exists($cidFile)) { [System.IO.File]::Delete($cidFile) }
     }
-    if ([CatchpointInterrupt]::Requested) { exit $ExitCodes.Interrupted }
+    if ([CatchpointInterrupt]::Requested) { return $ExitCodes.Interrupted }
     if ($runExitCode -ne $ExitCodes.Success) {
         if ($containerState.Id) {
             [Console]::Error.WriteLine("[$($Reasons.ContainerExitStatus)] wslc run returned code $runExitCode.")
@@ -444,7 +445,30 @@ public static class CatchpointInterrupt
             [Console]::Error.WriteLine("[$($Reasons.ContainerFailed)] wslc run exited with code $runExitCode.")
         }
     }
-    exit $runExitCode
+    return $runExitCode
+}
+
+try {
+    $parsed = Read-LauncherArguments -Arguments $launcherArguments
+    if ($parsed.HelpRequested) {
+        Show-LauncherHelp
+        exit $ExitCodes.Success
+    }
+    Assert-ValidArguments -Image $parsed.Image -Tag $parsed.Tag -RuntimeArguments $parsed.RuntimeArguments
+    $runtimeArguments = @($parsed.RuntimeArguments)
+
+    Assert-Virtualization
+    $wslc = Get-WslcRuntime
+    if ($wslc.Version -lt $MinimumCapabilityVersion) {
+        Write-Warning "wslc $($wslc.Version) does not support adding capabilities; any $($Options.AddCapability) options will be ignored."
+        $runtimeArguments = @(Remove-CapabilityArguments -Arguments $runtimeArguments)
+    }
+    if ($parsed.Image -ceq $EnterpriseImage -and -not (Test-BrowserCapability -Arguments $runtimeArguments)) {
+        Write-Warning "The $EnterpriseImage image needs $($Options.AddCapability) $BrowserCapability for browser tests. Without it, browser-based tests will not run."
+    }
+
+    $imageReference = "$ImageRepository/$($parsed.Image):$($parsed.Tag)"
+    exit (Invoke-Container -WslcPath $wslc.Path -ImageReference $imageReference -RuntimeArguments $runtimeArguments)
 }
 catch {
     $failureExitCode = $ExitCodes.Failure
